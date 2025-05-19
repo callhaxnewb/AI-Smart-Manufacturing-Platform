@@ -2,6 +2,16 @@ const fs = require('fs');
 const path = require('path');
 const csv = require('csv-parser');
 const SensorData = require('../models/SensorData');
+const { 
+  anomalyDetection, 
+  maintenancePrediction, 
+  qualityScoring 
+} = require('../ml');  // This points to your ml/index.js
+const Equipment = require('../models/equipment');
+const mongoose = require('mongoose');
+const dotenv = require('dotenv');
+
+dotenv.config();
 
 
 function parseCustomDate(dateStr) {
@@ -234,10 +244,6 @@ const mapCsvToSchema = (row) => {
       // Calculate derived fields
       efficiency: calculateEfficiency(row),
       
-      // Mock fields for demo purposes
-      quality_score: mockQualityScore(row),
-      anomaly_score: mockAnomalyScore(row),
-      maintenance_prediction: mockMaintenancePrediction(row)
     };
   } catch (error) {
     console.error('Error mapping CSV row to schema:', error);
@@ -263,63 +269,64 @@ function calculateEfficiency(row) {
   return parseFloat(efficiency.toFixed(2));
 }
 
-// Mock quality score for demo purposes
-function mockQualityScore(row) {
-  // This would be replaced with actual quality calculations
-  const thicknessDiff = Math.abs(
-    parseFloat(row.ST110_VAREx_0_SDickeIst || 0) - 
-    parseFloat(row.ST110_VAREx_0_SDickeSoll || 0)
-  );
-  
-  // Higher when thickness is close to target
-  let qualityScore = 100 - (thicknessDiff * 10);
-  if (qualityScore < 0) qualityScore = 0;
-  if (qualityScore > 100) qualityScore = 100;
-  
-  return parseFloat(qualityScore.toFixed(2));
-}
-
-// Mock anomaly score for demo purposes
-function mockAnomalyScore(row) {
-  // This would be replaced with actual ML-based anomaly detection
-  // For now, we'll use a simple rule: flag if pressure is too high
-  const pressure = parseFloat(row.ST110_VARExtr_1_druck_1_IstP || 0);
-  
-  // Random fluctuations with occasional spikes
-  let anomalyScore = Math.random() * 0.3; // Base noise
-  
-  if (pressure > 85) {
-    anomalyScore += 0.5; // High pressure indicates potential issue
+// Create or get default equipment for maintenance prediction
+async function getDefaultEquipment() {
+  try {
+    let equipment = await Equipment.findOne({ name: "Default Main Extruder" });
+    
+    if (!equipment) {
+      equipment = new Equipment({
+        name: "Default Main Extruder",
+        type: "extruder",
+        location: "Production Line 1",
+        serialNumber: "DEFAULT-001",
+        installationDate: new Date('2020-01-01'),
+        lastMaintenanceDate: new Date('2024-01-01'),
+        specifications: {
+          manufacturer: "ManufacturingCorp",
+          model: "EXT-1000",
+          powerRating: 100,
+          maxOperatingTemp: 300,
+          maxPressure: 150,
+        },
+        sensors: [
+          {
+            name: "Pressure Sensor",
+            type: "pressure",
+            unit: "bar",
+            normalRange: { min: 50, max: 150 }
+          },
+          {
+            name: "Temperature Sensor", 
+            type: "temperature",
+            unit: "Celsius",
+            normalRange: { min: 100, max: 250 }
+          }
+        ]
+      });
+      await equipment.save();
+    }
+    
+    return equipment;
+  } catch (error) {
+    console.error('Error getting default equipment:', error);
+    // Return a mock equipment object if database fails
+    return {
+      _id: 'default-equipment-id',
+      name: "Default Main Extruder",
+      type: "extruder",
+      installationDate: new Date('2020-01-01'),
+      lastMaintenanceDate: new Date('2024-01-01'),
+      sensors: [
+        {
+          name: "Pressure Sensor",
+          type: "pressure", 
+          unit: "bar",
+          normalRange: { min: 50, max: 150 }
+        }
+      ]
+    };
   }
-  
-  return parseFloat(anomalyScore.toFixed(2));
-}
-
-// Mock maintenance prediction for demo purposes
-function mockMaintenancePrediction(row) {
-  // This would be replaced with actual ML-based prediction
-  // For now, we'll use a simple heuristic based on temperature and pressure
-  const temperature = parseFloat(row.ST110_VARExtr_1_Massetemperatur || 0);
-  const pressure = parseFloat(row.ST110_VARExtr_1_druck_1_IstP || 0);
-  
-  let riskLevel = 'low';
-  let daysToMaintenance = 30;
-  
-  if (temperature > 200 && pressure > 80) {
-    riskLevel = 'critical';
-    daysToMaintenance = Math.floor(Math.random() * 3) + 1;
-  } else if (temperature > 180 && pressure > 70) {
-    riskLevel = 'high';
-    daysToMaintenance = Math.floor(Math.random() * 7) + 3;
-  } else if (temperature > 160 && pressure > 60) {
-    riskLevel = 'medium';
-    daysToMaintenance = Math.floor(Math.random() * 10) + 10;
-  }
-  
-  return {
-    risk_level: riskLevel,
-    days_to_maintenance: daysToMaintenance
-  };
 }
 
 /**
@@ -327,13 +334,17 @@ function mockMaintenancePrediction(row) {
  * @param {string} filePath - Path to the CSV file
  * @param {function} callback - Callback function to execute after import completes
  */
-const importCsvToMongo = (filePath, callback) => {
+
+const importCsvToMongo = async (filePath, callback) => {
   const results = [];
-  console.log(`Starting CSV import from ${filePath}`);
-  
-  fs.createReadStream(filePath)
+  const executionId = Math.random().toString(36).substring(2, 8);
+  console.log(`Starting CSV import from ${filePath} (execution ${executionId})`);
+  const stream = fs.createReadStream(filePath);
+  let isEndTriggered = false;
+  let allProcessedData = []; // Store all processed records
+
+  stream
     .pipe(csv({
-      // Add options to make parsing more robust
       separator: ',',
       skipEmptyLines: true,
       strict: false,
@@ -341,44 +352,142 @@ const importCsvToMongo = (filePath, callback) => {
     }))
     .on('data', (data) => results.push(data))
     .on('end', async () => {
-      try {
-        console.log(`CSV file read complete. Found ${results.length} records.`);
-        
-        // Process in batches to avoid memory issues with large files
-        const batchSize = 100;
-        let processed = 0;
-        let failedRecords = 0;
-        
-        for (let i = 0; i < results.length; i += batchSize) {
-          const batch = results.slice(i, i + batchSize);
-          const documents = batch.map(mapCsvToSchema).filter(doc => {
-            // Skip documents without a valid timestamp
-            if (!doc.timestamp || isNaN(doc.timestamp.getTime())) {
-              failedRecords++;
-              return false;
-            }
-            return true;
-          });
-          
-          // Only insert if we have valid documents
-          if (documents.length > 0) {
-            await SensorData.insertMany(documents, { ordered: false });
-          }
-          
-          processed += batch.length;
-          console.log(`Imported ${processed}/${results.length} records (${failedRecords} failed)`);
-        }
-        
-        console.log('CSV import completed successfully');
-        console.log(`Total records: ${results.length}, Failed: ${failedRecords}, Imported: ${results.length - failedRecords}`);
-        callback(null, { success: true, count: results.length - failedRecords, failed: failedRecords });
-      } catch (error) {
-        console.error('Error importing CSV data:', error);
-        callback(error);
+      if (isEndTriggered) {
+        console.warn(`Warning: CSV stream "end" event triggered multiple times (execution ${executionId})`);
+        return;
       }
+      isEndTriggered = true;
+
+      console.log(`CSV file read complete. Found ${results.length} records (execution ${executionId}).`);
+      const batchSize = 20;
+      let processed = 0;
+      let failedRecords = 0;
+
+      for (let i = 0; i < results.length; i += batchSize) {
+        const batchNumber = Math.floor(i / batchSize) + 1;
+        console.log(`Processing batch ${batchNumber}/${Math.ceil(results.length / batchSize)} (execution ${executionId}, index ${i})`);
+
+        const batch = results.slice(i, i + batchSize);
+        console.log(`Batch ${batchNumber} contains ${batch.length} records (execution ${executionId})`);
+        let docs = batch.map(mapCsvToSchema).filter(doc => {
+          if (!doc.timestamp || isNaN(doc.timestamp.getTime())) {
+            console.warn(`Invalid timestamp in batch ${batchNumber} (execution ${executionId})`);
+            failedRecords++;
+            return false;
+          }
+          return true;
+        });
+
+        if (docs.length === 0) {
+          console.log(`No valid documents in batch ${batchNumber} (execution ${executionId}), skipping...`);
+          continue;
+        }
+
+        // Anomaly Detection
+        console.log(`  - Running anomaly detection for batch ${batchNumber} (execution ${executionId})...`);
+        try {
+          docs = await anomalyDetection.processBatch(docs, allProcessedData);
+          console.log(`  - Anomaly detection completed for batch ${batchNumber}. Found ${docs.filter(d => d.is_anomaly).length} anomalies (execution ${executionId}).`);
+          allProcessedData.push(...docs); // Add processed docs to historical data
+          allProcessedData = allProcessedData.slice(-200); // Limit to 200 records
+        } catch (error) {
+          console.error(`Error in anomaly detection for batch ${batchNumber} (execution ${executionId}):`, error);
+          docs = docs.map(doc => ({
+            ...doc,
+            anomaly_score: 0,
+            is_anomaly: false,
+            anomaly_parameters: [],
+            anomaly_method: 'none'
+          }));
+        }
+
+        // Quality Scoring
+        console.log(`  - Running quality assessment for batch ${batchNumber} (execution ${executionId})...`);
+        try {
+          docs = await qualityScoring.processQualityBatch(docs);
+          console.log(`  - Quality scoring completed for batch ${batchNumber}. Average quality: ${(docs.reduce((sum, d) => sum + d.quality_score, 0) / docs.length).toFixed(2)} (execution ${executionId})`);
+        } catch (error) {
+          console.error(`Error in quality scoring for batch ${batchNumber} (execution ${executionId}):`, error);
+          docs = docs.map(doc => ({
+            ...doc,
+            quality_score: 0,
+            quality_details: {},
+            process_capability: {
+              thickness: { Cp: 0, Cpk: 0 },
+              throughput: { Cp: 0, Cpk: 0 }
+            }
+          }));
+        }
+
+        // Maintenance Prediction
+        console.log(`  - Running maintenance prediction for batch ${batchNumber} (execution ${executionId})...`);
+        try {
+          const defaultEquipment = await getDefaultEquipment();
+          const sensorDataMap = {};
+          docs.forEach(doc => {
+            sensorDataMap[defaultEquipment._id] = {
+              extruder_A_pressure: doc.extruder_A_pressure,
+              extruder_A_temperature: doc.extruder_A_temperature,
+              total_output: doc.total_output
+            };
+          });
+
+          const maintenanceResults = maintenancePrediction.processBatch([defaultEquipment], sensorDataMap);
+          const maintenanceResult = maintenanceResults[0];
+
+          docs = docs.map(doc => ({
+            ...doc,
+            maintenance_prediction: maintenanceResult?.maintenance_prediction || {
+              days_to_maintenance: 30,
+              risk_level: 'low',
+              next_maintenance_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              confidence: 0.7
+            },
+            healthScore: maintenanceResult?.healthScore || 8
+          }));
+
+          console.log(`  - Maintenance prediction completed for batch ${batchNumber} (execution ${executionId}).`);
+        } catch (error) {
+          console.error(`Error in maintenance prediction for batch ${batchNumber} (execution ${executionId}):`, error);
+          docs = docs.map(doc => ({
+            ...doc,
+            maintenance_prediction: {
+              days_to_maintenance: 30,
+              risk_level: 'low',
+              next_maintenance_date: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+              confidence: 0.7
+            },
+            healthScore: 8
+          }));
+        }
+
+        // Insert documents
+        if (docs.length > 0) {
+          try {
+            await SensorData.insertMany(docs, { ordered: false });
+            processed += docs.length;
+            console.log(`  - Inserted ${docs.length} documents for batch ${batchNumber} (execution ${executionId}).`);
+            allProcessedData.push(...docs); // Moved after insertion
+            allProcessedData = allProcessedData.slice(-200);
+          } catch (insertError) {
+            console.error(`Error inserting documents for batch ${batchNumber} (execution ${executionId}):`, insertError);
+            failedRecords += docs.length;
+          }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      console.log(`CSV import completed successfully (execution ${executionId})`);
+      console.log(`Total records: ${results.length}, Failed: ${failedRecords}, Imported: ${results.length - failedRecords} (execution ${executionId})`);
+      callback(null, {
+        success: true,
+        count: results.length - failedRecords,
+        failed: failedRecords
+      });
     })
     .on('error', (error) => {
-      console.error('Error reading CSV file:', error);
+      console.error(`Error reading CSV file (execution ${executionId}):`, error);
       callback(error);
     });
 };
@@ -387,47 +496,40 @@ const importCsvToMongo = (filePath, callback) => {
  * Command-line script to import CSV data
  * Usage: node importCsv.js <path-to-csv-file>
  */
-const runImport = () => {
-  // Check if script is being run directly
+const runImport = async () => {
+  const executionId = Math.random().toString(36).substring(2, 8); // Unique ID for this execution
+  console.log(`Starting import with execution ID: ${executionId}`);
   if (require.main === module) {
     const filePath = process.argv[2];
-    
     if (!filePath) {
-      console.error('Please provide a CSV file path: node importCsv.js <path-to-csv-file>');
+      console.error(`Please provide a CSV file path (execution ${executionId}): node importCsv.js <path-to-csv-file>`);
       process.exit(1);
     }
-    
-    // Connect to MongoDB
-    const mongoose = require('mongoose');
-    const dotenv = require('dotenv');
-    
-    dotenv.config();
-    
-    mongoose.connect("mongodb://localhost:27017/smart-manufacturing", {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    })
-    .then(() => {
-      console.log('MongoDB Connected');
-      
+
+    try {
+      if (mongoose.connection.readyState === 0) { // Only connect if not already connected
+        await mongoose.connect("mongodb://localhost:27017/smart-manufacturing", {
+          useNewUrlParser: true,
+          useUnifiedTopology: true
+        });
+        console.log(`MongoDB Connected (execution ${executionId})`);
+      }
+
       importCsvToMongo(filePath, (err, result) => {
         if (err) {
-          console.error('Import failed:', err);
+          console.error(`Import failed (execution ${executionId}):`, err);
           process.exit(1);
         }
-        
-        console.log(`Import completed: ${result.count} records imported (${result.failed} records failed)`);
+        console.log(`Import completed (execution ${executionId}): ${result.count} records imported (${result.failed} records failed)`);
         process.exit(0);
       });
-    })
-    .catch(err => {
-      console.error('MongoDB connection error:', err);
+    } catch (err) {
+      console.error(`MongoDB connection error (execution ${executionId}):`, err);
       process.exit(1);
-    });
+    }
   }
 };
 
-// Run the import if this file is executed directly
 runImport();
 
 module.exports = {

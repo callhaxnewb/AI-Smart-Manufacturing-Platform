@@ -1,4 +1,8 @@
 const SensorData = require('../models/SensorData');
+const Equipment = require('../models/equipment');
+const { detectAnomalies, processBatch: processAnomalyBatch } = require('../ml/anomalyDetection');
+const { predictMaintenance, processBatch: processMaintenanceBatch } = require('../ml/maintenancePrediction');
+const { calculateQualityScore, processQualityBatch } = require('../ml/qualityScoring');
 
 // @desc    Get all sensor data with pagination
 // @route   GET /api/sensor-data
@@ -95,6 +99,7 @@ exports.getAnalytics = async (req, res) => {
           avgTotalOutput: { $avg: '$total_output' },
           avgTargetOutput: { $avg: '$target_output' },
           efficiencyAvg: { $avg: '$efficiency' },
+          avgQualityScore: { $avg: '$quality_score' },
           recordCount: { $sum: 1 },
           anomalyCount: { 
             $sum: { 
@@ -221,6 +226,123 @@ exports.importSensorData = async (req, res) => {
     });
   } catch (error) {
     console.error(`Error importing data: ${error}`);
+    res.status(500).json({
+      success: false,
+      message: 'Server Error'
+    });
+  }
+};
+
+// @desc    Get quality scores
+// @route   GET /api/sensor-data/quality
+// @access  Public
+exports.getQualityScores = async (req, res) => {
+  try {
+    const timeframe = req.query.timeframe || '24h'; // Default to last 24 hours
+    let startDate = new Date();
+
+    // Calculate start date based on timeframe
+    switch (timeframe) {
+      case '24h':
+        startDate.setHours(startDate.getHours() - 24);
+        break;
+      case '7d':
+        startDate.setDate(startDate.getDate() - 7);
+        break;
+      case '30d':
+        startDate.setDate(startDate.getDate() - 30);
+        break;
+      default:
+        startDate.setHours(startDate.getHours() - 24);
+    }
+
+    // Fetch recent sensor data
+    const sensorData = await SensorData.find({ timestamp: { $gte: startDate } })
+      .sort({ timestamp: -1 })
+      .limit(100);
+
+    // Process quality scores
+    const qualityResults = await processQualityBatch(sensorData);
+
+    // Calculate average quality score
+    const avgQualityScore = qualityResults.length > 0
+      ? Math.round(qualityResults.reduce((sum, item) => sum + item.quality_score, 0) / qualityResults.length)
+      : 0;
+
+    res.json({
+      success: true,
+      timeframe,
+      count: qualityResults.length,
+      avgQualityScore,
+      data: qualityResults
+    });
+  } catch (error) {
+    console.error(`Error fetching quality scores: ${error}`);
+    res.status(500).json({
+      success: false,
+      message: 'Server Error'
+    });
+  }
+};
+
+// @desc    Process sensor data through all ML modules
+// @route   POST /api/sensor-data/process
+// @access  Public
+exports.processSensorData = async (req, res) => {
+  try {
+    const sensorData = Array.isArray(req.body) ? req.body : [req.body];
+    
+    // Fetch equipment data for maintenance predictions
+    const equipmentData = await Equipment.find({}).lean();
+    const equipmentMap = equipmentData.reduce((map, equip) => {
+      map[equip._id.toString()] = equip;
+      return map;
+    }, {});
+
+    // Process through anomaly detection
+    const anomalyProcessed = processAnomalyBatch(sensorData);
+
+    // Process through maintenance prediction
+    const maintenanceProcessed = processMaintenanceBatch(equipmentData, anomalyProcessed.reduce((map, data) => {
+      map[data._id] = data;
+      return map;
+    }, {}));
+
+    // Process through quality scoring
+    const fullyProcessed = await processQualityBatch(anomalyProcessed);
+
+    // Save processed data to MongoDB
+    const savedData = await SensorData.insertMany(fullyProcessed.map(data => ({
+      ...data,
+      timestamp: data.timestamp || new Date(),
+      extruder_A_pressure: data.ST110_VARExtr_1_druck_1_IstP,
+      extruder_B_pressure: data.ST110_VARExtr_2_druck_1_IstP,
+      extruder_C_pressure: data.ST110_VARExtr_3_druck_1_IstP,
+      extruder_A_temperature: data.ST110_VARExtr_1_Massetemperatur,
+      extruder_B_temperature: data.ST110_VARExtr_2_Massetemperatur,
+      extruder_C_temperature: data.ST110_VARExtr_3_Massetemperatur,
+      total_output: data.ST110_VAREx_0_GesamtDS,
+      target_output: data.ST110_VAREx_0_SollDS,
+      efficiency: data.ST110_VAREx_0_SDickeIst && data.ST110_VAREx_0_SDickeSoll
+        ? (data.ST110_VAREx_0_SDickeIst / data.ST110_VAREx_0_SDickeSoll) * 100
+        : null,
+      anomaly_score: data.anomaly_score,
+      is_anomaly: data.is_anomaly,
+      anomaly_parameters: data.anomaly_parameters,
+      anomaly_method: data.anomaly_method,
+      maintenance_prediction: maintenanceProcessed.find(m => m._id.toString() === data._id)?.maintenance_prediction || {},
+      quality_score: data.quality_score,
+      quality_details: data.quality_details,
+      process_capability: data.process_capability
+    })));
+
+    res.json({
+      success: true,
+      count: savedData.length,
+      data: savedData
+    });
+  } catch (error) {
+    console.error(`Error processing sensor data: ${error}`);
     res.status(500).json({
       success: false,
       message: 'Server Error'

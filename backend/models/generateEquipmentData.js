@@ -24,7 +24,10 @@ const randomDate = (start, end) => {
 
 // Function to generate a single equipment document
 const generateEquipment = () => {
-  const type = types[Math.floor(Math.random() * types.length)];
+  // Ensure at least one of each critical type across generated records
+  const criticalTypes = ['extruder', 'blower'];
+  const typeIndex = equipments.length % criticalTypes.length;
+  const type = equipments.length < criticalTypes.length ? criticalTypes[typeIndex] : types[Math.floor(Math.random() * types.length)];
   const sensorCount = Math.floor(Math.random() * 3) + 1;
   const sensorTypes = ['temperature', 'pressure', 'vibration', 'flow'];
   
@@ -42,8 +45,14 @@ const generateEquipment = () => {
       type: sensorType,
       unit: sensorUnit,
       normalRange: {
-        min: Math.floor(Math.random() * 50),
-        max: Math.floor(Math.random() * 150) + 50,
+        min: sensorType === 'pressure' ? Math.floor(Math.random() * 20) :
+               sensorType === 'temperature' ? Math.floor(Math.random() * 50) + 50 :
+               sensorType === 'flow' ? Math.floor(Math.random() * 50) + 100 :
+               sensorType === 'vibration' ? Math.floor(Math.random() * 5) : 0,
+        max: sensorType === 'pressure' ? Math.floor(Math.random() * 80) + 20 :
+               sensorType === 'temperature' ? Math.floor(Math.random() * 100) + 100 :
+               sensorType === 'flow' ? Math.floor(Math.random() * 100) + 200 :
+               sensorType === 'vibration' ? Math.floor(Math.random() * 10) + 5 : 10,
       }
     });
   }

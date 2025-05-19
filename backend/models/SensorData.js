@@ -138,6 +138,33 @@ const SensorDataSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  is_anomaly: {
+    type: Boolean,
+    default: false
+  },
+  anomaly_parameters: [String],
+  anomaly_method: {
+    type: String,
+    default: 'none'
+  },
+  quality_details: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {}
+  },
+  process_capability: {
+    thickness: {
+      Cp: { type: Number, default: 0 },
+      Cpk: { type: Number, default: 0 }
+    },
+    throughput: {
+      Cp: { type: Number, default: 0 },
+      Cpk: { type: Number, default: 0 }
+    }
+  },
+  healthScore: {
+    type: Number,
+    default: 8
+  },
   maintenance_prediction: {
     risk_level: {
       type: String,
