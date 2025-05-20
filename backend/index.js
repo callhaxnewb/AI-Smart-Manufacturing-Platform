@@ -1,32 +1,52 @@
+// backend/index.js
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
-const connectDB = require('./config/db');
+const mongoose = require('mongoose'); // Add this
+const apiRoutes = require('./routes/api');
 
-// Load environment variables
-dotenv.config();
+const app = express();
+const PORT = process.env.PORT || 5000;
 
 // Connect to MongoDB
-connectDB();
-
-// Initialize Express
-const app = express();
+mongoose.connect('mongodb://localhost:27017/manufacturing_db', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => console.log('MongoDB Connected: localhost'))
+.catch(err => console.log('MongoDB connection error:', err));
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: 'http://localhost:5173', // Your frontend URL
+  credentials: true
+}));
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Routes
-app.use('/api', require('./routes/api'));
+// API Routes
+app.use('/api', apiRoutes);
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Server is running' });
+});
 
-// Basic route for testing
+// Root endpoint for testing
 app.get('/', (req, res) => {
-  res.send('Smart Manufacturing Analytics API is running');
+  res.json({ message: 'Manufacturing API Server' });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'Something went wrong!' });
 });
 
 // Start server
-const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`API endpoints: http://localhost:${PORT}/api/`);
 });
+
+module.exports = app;

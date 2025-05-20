@@ -182,6 +182,32 @@ exports.getAnomalies = async (req, res) => {
   }
 };
 
+exports.getAnomalyBreakdown = async (req, res) => {
+  try {
+    const breakdown = await SensorData.aggregate([
+      { $match: { is_anomaly: true } },
+      { $unwind: '$anomaly_parameters' },
+      { $group: { _id: '$anomaly_parameters', count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+    res.json({ success: true, breakdown });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error fetching breakdown' });
+  }
+};
+
+// sensorDataController.js
+exports.getSensorRecordById = async (req, res) => {
+  try {
+    const record = await SensorData.findById(req.params.id);
+    if (!record) return res.status(404).json({ success: false, message: 'Not found' });
+    res.json({ success: true, data: record });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
+
 // @desc    Get maintenance predictions
 // @route   GET /api/sensor-data/maintenance
 // @access  Public

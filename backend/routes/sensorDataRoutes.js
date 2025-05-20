@@ -7,7 +7,9 @@ const {
   getMaintenancePredictions,
   importSensorData,
   getQualityScores,
-  processSensorData
+  processSensorData,
+  getSensorRecordById,
+  getAnomalyBreakdown,
 } = require('../controllers/sensorDataController');
 
 // Routes for sensor data API
@@ -18,5 +20,9 @@ router.get('/maintenance', getMaintenancePredictions);
 router.get('/quality', getQualityScores);
 router.post('/import', importSensorData);
 router.post('/process', processSensorData);
+// sensorData.js (router)
+router.get('/:id', getSensorRecordById);
+// sensorData.js
+router.get('/anomalies/breakdown', getAnomalyBreakdown);
 
 module.exports = router;

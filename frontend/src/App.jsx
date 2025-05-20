@@ -1,18 +1,22 @@
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
-import Navbar from './components/Navbar.jsx';
-import Dashboard from './pages/Dashboard.jsx';
+import { useState } from "react";
+import { Dashboard } from "./pages/Dashboard";
+import { Equipment } from "./pages/Equipment";
+import { Analytics } from "./pages/Analytics";
+import { DataImport } from "./pages/DataImport";
+import { Sidebar } from "./components/Sidebar";
 
-function App() {
+export default function App() {
+  const [activePage, setActivePage] = useState('dashboard');
+
   return (
-    <Router>
-      <div className="min-h-screen bg-gray-100">
-        <Navbar />
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-        </Routes>
+    <div className="flex h-screen bg-gray-100">
+      <Sidebar activePage={activePage} setActivePage={setActivePage} />
+      <div className="flex-1 p-6 overflow-auto">
+        {activePage === 'dashboard' && <Dashboard />}
+        {activePage === 'equipment' && <Equipment />}
+        {activePage === 'analytics' && <Analytics />}
+        {activePage === 'import' && <DataImport />}
       </div>
-    </Router>
+    </div>
   );
 }
-
-export default App;
